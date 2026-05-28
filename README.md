@@ -13,6 +13,7 @@ A ready-to-use Streamlit web platform for extracting and comparing technical spe
   - Attribute value breakdown
   - Advanced attribute search with a **30% minimum appearance threshold**, plus a troubleshooting **Show all** option
 - Run a bottom-page brand comparison module that extracts common attributes and values from the listed brands, then exports Excel reports.
+- Use the separate **Review** tab to see all extracted data in a grouped review table matching the requested format: Values Correct/Missed/False and Attributes Spec Sheet NA/AI Returned False NA/False Positives/Omissions.
 - New: brand analysis has a **Product focus / cable family** field and an **Auto-fill if AI returns empty** safety option so dashboards do not come back blank if the model/web search returns no usable JSON.
 
 ## Files in this repository
@@ -92,6 +93,16 @@ Then open the local URL shown in the terminal.
 4. Click **Analyze uploaded documents and URLs**.
 5. Review the dashboards.
 6. Download the Excel report.
+7. Open the **Review** tab to see the grouped review table.
+
+### Review Tab
+
+The app now includes a separate **Review** tab. After you run document/URL analysis or brand analysis, open this tab and choose the data source. The table is displayed in the requested format with grouped headers:
+
+- **Values:** Correct, Missed, False
+- **Attributes:** Spec Sheet NA, AI Returned False NA, False Positives, Omissions
+
+Each category shows a count and percentage. You can also download the review table as an Excel report.
 
 ### Brand Comparison / Top Brand Attribute Extraction
 
@@ -120,6 +131,7 @@ There are two options:
 
 - Dashboard 3 follows the required 30% threshold by default. If no values meet the threshold, the app now shows a helpful message and the closest extracted values so it does not look broken.
 - The brand module now includes a **Brand Comparison Matrix** where each row is an attribute/value pair and each brand column shows whether that value was found.
+- The separate **Review** tab presents review results in a grouped table layout like the provided screenshot.
 - If brand analysis previously showed `Brands analyzed: 48` but `Unique attributes: 0`, update to this version and keep **Auto-fill if AI returns empty** turned ON.
 - The target brand list is loaded directly into `app.py`.
 - The uploaded requirement calls this the Top 50 Brands list; the provided named list contains 48 entries. The app includes an input box where you can add extra brands without editing code.

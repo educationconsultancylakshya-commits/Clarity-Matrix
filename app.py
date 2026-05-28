@@ -11,6 +11,7 @@ import io
 import json
 import os
 import hashlib
+import html
 import re
 import textwrap
 import time
@@ -1248,6 +1249,276 @@ def render_brand_analysis(enable_ai: bool, model: str, key_prefix: str = "brand"
         )
 
 
+
+def _review_blankable_count(value: int) -> str:
+    return "-" if int(value or 0) == 0 else str(int(value))
+
+
+def _review_blankable_percent(value: float) -> str:
+    return "-" if float(value or 0) == 0 else f"{float(value):.0f}%" if abs(float(value) - round(float(value))) < 0.005 else f"{float(value):.2f}%"
+
+
+def _is_na_like(value: Any) -> bool:
+    text = clean_text(str(value or "")).strip().lower()
+    if not text:
+        return True
+    compact = re.sub(r"[^a-z0-9]+", "", text)
+    return compact in {"na", "n/a", "notapplicable", "notavailable", "none", "null", "nodata", "notspecified", "unknown", "blank"}
+
+
+def _status_series(records_df: pd.DataFrame) -> pd.Series:
+    if "ai_validation" not in records_df.columns:
+        return pd.Series(["not_checked"] * len(records_df), index=records_df.index)
+    status = records_df["ai_validation"].fillna("not_checked").astype(str).str.strip().str.lower()
+    # Normalize common labels without letting "invalid" accidentally become "valid".
+    normalized = []
+    for item in status:
+        if item in {"valid", "correct", "true", "approved", "pass", "passed"}:
+            normalized.append("valid")
+        elif item in {"invalid", "false", "incorrect", "fail", "failed"} or "invalid" in item or "false" in item:
+            normalized.append("invalid")
+        elif "review" in item or "check" in item or "verify" in item:
+            normalized.append("review")
+        else:
+            normalized.append("not_checked")
+    return pd.Series(normalized, index=records_df.index)
+
+
+def build_review_summary(records_df: pd.DataFrame, total_resources: int) -> pd.DataFrame:
+    """Build the Review tab summary in the user's requested grouped table format."""
+    columns = [
+        "Attributes",
+        "Values Correct Count", "Values Correct %",
+        "Values Missed Count", "Values Missed %",
+        "Values False Count", "Values False %",
+        "Spec Sheet NA Count", "Spec Sheet NA %",
+        "AI Returned False NA Count", "AI Returned False NA %",
+        "False Positives Count", "False Positives %",
+        "Omissions Count", "Omissions %",
+    ]
+    if records_df.empty or "attribute" not in records_df.columns:
+        return pd.DataFrame(columns=columns)
+
+    df = records_df.copy()
+    df["attribute"] = df["attribute"].astype(str).map(normalize_attribute)
+    df["value"] = df.get("value", "").astype(str)
+    if "resource_id" not in df.columns:
+        df["resource_id"] = df.get("resource_name", pd.Series(range(len(df)), index=df.index)).astype(str)
+    df["resource_id"] = df["resource_id"].astype(str)
+    df["_status"] = _status_series(df)
+    df["_is_na"] = df["value"].map(_is_na_like)
+
+    # A record is accepted when it is not explicitly invalid and the value is not NA-like.
+    df["_accepted"] = (~df["_is_na"]) & (~df["_status"].eq("invalid"))
+    df["_false"] = df["_status"].eq("invalid")
+
+    total_entities = int(total_resources or df["resource_id"].nunique() or 0)
+    total_entities = max(total_entities, 1)
+
+    rows: List[Dict[str, Any]] = []
+    for attr in sorted([a for a in df["attribute"].dropna().unique() if str(a).strip()]):
+        sub = df[df["attribute"] == attr]
+        attr_entities = set(sub["resource_id"].unique())
+        accepted_entities = set(sub.loc[sub["_accepted"], "resource_id"].unique())
+        false_entities = set(sub.loc[sub["_false"], "resource_id"].unique())
+        na_entities = set(sub.loc[sub["_is_na"], "resource_id"].unique())
+
+        correct_count = len(accepted_entities)
+        false_count = len(false_entities)
+        spec_na_count = len(na_entities)
+        # If an AI/fallback/source returned NA-like values, show them in this specific bucket.
+        method_text = sub.get("extraction_method", pd.Series([""] * len(sub), index=sub.index)).astype(str).str.lower()
+        ai_or_model_mask = method_text.str.contains("ai|model|fallback|openai", na=False)
+        ai_false_na_count = len(set(sub.loc[sub["_is_na"] & ai_or_model_mask, "resource_id"].unique()))
+        false_positive_count = false_count
+        missed_count = max(total_entities - len(attr_entities), 0)
+        omissions_count = missed_count
+
+        def pct(count: int) -> float:
+            return (count / total_entities) * 100 if total_entities else 0.0
+
+        rows.append(
+            {
+                "Attributes": attr,
+                "Values Correct Count": correct_count,
+                "Values Correct %": pct(correct_count),
+                "Values Missed Count": missed_count,
+                "Values Missed %": pct(missed_count),
+                "Values False Count": false_count,
+                "Values False %": pct(false_count),
+                "Spec Sheet NA Count": spec_na_count,
+                "Spec Sheet NA %": pct(spec_na_count),
+                "AI Returned False NA Count": ai_false_na_count,
+                "AI Returned False NA %": pct(ai_false_na_count),
+                "False Positives Count": false_positive_count,
+                "False Positives %": pct(false_positive_count),
+                "Omissions Count": omissions_count,
+                "Omissions %": pct(omissions_count),
+            }
+        )
+
+    summary = pd.DataFrame(rows, columns=columns)
+    if summary.empty:
+        return summary
+
+    count_cols = [c for c in summary.columns if c.endswith(" Count")]
+    total_row: Dict[str, Any] = {"Attributes": "Total"}
+    for col in count_cols:
+        total_row[col] = int(summary[col].sum())
+    value_total_base = max(
+        int(total_row.get("Values Correct Count", 0)) + int(total_row.get("Values Missed Count", 0)) + int(total_row.get("Values False Count", 0)),
+        1,
+    )
+    attr_total_base = max(
+        int(total_row.get("Spec Sheet NA Count", 0))
+        + int(total_row.get("AI Returned False NA Count", 0))
+        + int(total_row.get("False Positives Count", 0))
+        + int(total_row.get("Omissions Count", 0)),
+        1,
+    )
+    total_row["Values Correct %"] = total_row["Values Correct Count"] / value_total_base * 100
+    total_row["Values Missed %"] = total_row["Values Missed Count"] / value_total_base * 100
+    total_row["Values False %"] = total_row["Values False Count"] / value_total_base * 100
+    total_row["Spec Sheet NA %"] = total_row["Spec Sheet NA Count"] / attr_total_base * 100
+    total_row["AI Returned False NA %"] = total_row["AI Returned False NA Count"] / attr_total_base * 100
+    total_row["False Positives %"] = total_row["False Positives Count"] / attr_total_base * 100
+    total_row["Omissions %"] = total_row["Omissions Count"] / attr_total_base * 100
+
+    return pd.concat([summary, pd.DataFrame([total_row])], ignore_index=True)
+
+
+def review_summary_to_export(summary_df: pd.DataFrame) -> pd.DataFrame:
+    """Create a flat export-friendly version of the review summary."""
+    if summary_df.empty:
+        return summary_df
+    out = summary_df.copy()
+    for col in [c for c in out.columns if c.endswith(" %")]:
+        out[col] = out[col].map(lambda x: round(float(x or 0), 2))
+    return out
+
+
+def render_review_summary_table(summary_df: pd.DataFrame) -> None:
+    """Render the grouped review table with merged headers like the sample image."""
+    if summary_df.empty:
+        st.info("No review data is available yet. Run document/URL analysis or brand analysis first.")
+        return
+
+    css = """
+    <style>
+    .review-scroll {overflow-x: auto; border: 1px solid #d5dbe3; box-shadow: 0 2px 6px rgba(15,23,42,.12);}
+    table.review-table {border-collapse: collapse; min-width: 1250px; width: 100%; font-family: Arial, sans-serif; font-size: 14px; color: #5b6470; background: white;}
+    table.review-table th {background: #5f8fab; color: white; border: 1px solid #ffffff; padding: 11px 10px; text-align: center; font-weight: 700;}
+    table.review-table th.sub {background: #7fa4ba;}
+    table.review-table td {border: 1px solid #ffffff; padding: 10px 10px; text-align: center;}
+    table.review-table td.attr {text-align: left; min-width: 230px; color: #68727f;}
+    table.review-table tr:nth-child(odd) td {background: #eef0f2;}
+    table.review-table tr:nth-child(even) td {background: #ffffff;}
+    table.review-table tr.total-row td {font-weight: 700; background: #f1f3f5;}
+    </style>
+    """
+    headers = """
+    <div class="review-scroll">
+    <table class="review-table">
+      <thead>
+        <tr>
+          <th rowspan="2">Attributes</th>
+          <th colspan="6">Values</th>
+          <th colspan="8">Attributes</th>
+        </tr>
+        <tr>
+          <th class="sub" colspan="2">Correct</th>
+          <th class="sub" colspan="2">Missed</th>
+          <th class="sub" colspan="2">False</th>
+          <th class="sub" colspan="2">Spec Sheet<br>NA</th>
+          <th class="sub" colspan="2">AI Returned<br>False NA</th>
+          <th class="sub" colspan="2">False Positives</th>
+          <th class="sub" colspan="2">Omissions</th>
+        </tr>
+      </thead>
+      <tbody>
+    """
+    body_parts: List[str] = []
+    for _, row in summary_df.iterrows():
+        is_total = str(row.get("Attributes", "")).strip().lower() == "total"
+        cls = ' class="total-row"' if is_total else ""
+        cells = [f'<td class="attr">{html.escape(str(row.get("Attributes", "")))}</td>']
+        pairs = [
+            ("Values Correct Count", "Values Correct %"),
+            ("Values Missed Count", "Values Missed %"),
+            ("Values False Count", "Values False %"),
+            ("Spec Sheet NA Count", "Spec Sheet NA %"),
+            ("AI Returned False NA Count", "AI Returned False NA %"),
+            ("False Positives Count", "False Positives %"),
+            ("Omissions Count", "Omissions %"),
+        ]
+        for count_col, pct_col in pairs:
+            cells.append(f"<td>{_review_blankable_count(row.get(count_col, 0))}</td>")
+            cells.append(f"<td>{_review_blankable_percent(row.get(pct_col, 0))}</td>")
+        body_parts.append(f"<tr{cls}>" + "".join(cells) + "</tr>")
+    table_html = css + headers + "\n".join(body_parts) + "</tbody></table></div>"
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
+def render_review_tab() -> None:
+    st.header("Review")
+    st.write(
+        "This tab shows a grouped extraction-review summary in the same format as your sample: "
+        "value accuracy buckets in the middle and attribute review buckets on the right."
+    )
+
+    available_sources: List[str] = []
+    if "main_records" in st.session_state:
+        available_sources.append("Document & URL Analysis")
+    if "brand_records" in st.session_state:
+        available_sources.append("Brand Analysis")
+
+    if not available_sources:
+        st.info("Run an analysis first. After extraction, return to this Review tab to see the grouped review table.")
+        return
+
+    source_choice = st.radio("Review data source", available_sources, horizontal=True)
+    if source_choice == "Document & URL Analysis":
+        records_df = st.session_state.get("main_records", pd.DataFrame())
+        total_resources = int(st.session_state.get("main_resource_count", 0) or 0)
+        file_name = "document_url_review_report.xlsx"
+    else:
+        records_df = st.session_state.get("brand_records", pd.DataFrame())
+        total_resources = int(st.session_state.get("brand_count", 0) or 0)
+        file_name = "brand_review_report.xlsx"
+
+    if records_df.empty:
+        st.warning("The selected source has no extracted records yet.")
+        return
+
+    st.caption(
+        "Counts are calculated per analyzed resource/brand. If AI validation is enabled, invalid rows are counted as False/False Positives. "
+        "Without AI validation, extracted non-NA values are treated as Correct so the table remains usable."
+    )
+    summary_df = build_review_summary(records_df, total_resources)
+    render_review_summary_table(summary_df)
+
+    with st.expander("Show review data as a normal table"):
+        display_df = summary_df.copy()
+        for col in [c for c in display_df.columns if c.endswith(" %")]:
+            display_df[col] = display_df[col].map(lambda x: _review_blankable_percent(x))
+        for col in [c for c in display_df.columns if c.endswith(" Count")]:
+            display_df[col] = display_df[col].map(lambda x: _review_blankable_count(x))
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    export_bytes = dataframe_to_excel_bytes(
+        {
+            "Review Summary": review_summary_to_export(summary_df),
+            "Raw Records": records_df,
+        }
+    )
+    st.download_button(
+        "Download review Excel report",
+        data=export_bytes,
+        file_name=file_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"review_download_{source_choice}",
+    )
+
 def render_deployment_help() -> None:
     st.header("No-Code GitHub Deployment Help")
     st.markdown(
@@ -1278,12 +1549,14 @@ streamlit run app.py
 def main() -> None:
     render_header()
     enable_ai, enable_validation, model = render_sidebar()
-    tab1, tab2 = st.tabs(["Documents, URLs & Brand Comparison", "Deploy Help"])
+    tab1, tab2, tab3 = st.tabs(["Documents, URLs & Brand Comparison", "Review", "Deploy Help"])
     with tab1:
         render_main_analysis(enable_ai, enable_validation, model)
         st.divider()
         render_brand_analysis(enable_ai, model, key_prefix="bottom_brand")
     with tab2:
+        render_review_tab()
+    with tab3:
         render_deployment_help()
 
 
