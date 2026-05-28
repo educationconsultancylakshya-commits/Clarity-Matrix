@@ -13,6 +13,7 @@ A ready-to-use Streamlit web platform for extracting and comparing technical spe
   - Attribute value breakdown
   - Advanced attribute search with a **30% minimum appearance threshold**, plus a troubleshooting **Show all** option
 - Run a bottom-page brand comparison module that extracts common attributes and values from the listed brands, then exports Excel reports.
+- New: brand analysis has a **Product focus / cable family** field and an **Auto-fill if AI returns empty** safety option so dashboards do not come back blank if the model/web search returns no usable JSON.
 
 ## Files in this repository
 
@@ -98,23 +99,28 @@ This section now appears **at the bottom of the main platform page**, underneath
 
 There are two options:
 
-**Option A: Automatic AI web brand analysis**
+**Option A: Automatic AI brand analysis with blank-result protection**
 
 - Turn on AI extraction in the sidebar.
 - Add your OpenAI API key in Streamlit Cloud secrets.
 - Scroll to the bottom section named **Brand Comparison / Top Brand Attribute Extraction**.
+- Enter the product family, for example `Fire alarm cable`.
+- Keep **Auto-fill if AI returns empty** turned ON. This prevents empty brand dashboards when the selected AI model cannot browse the web or returns no valid JSON.
 - Click **Get common attributes and values from the Top 50 Brands**.
+- Check the **Raw Brand Records** table. Rows marked `built_in_industry_fallback` came from the built-in fallback, while rows marked `ai_web_brand_analysis` came from the AI response.
 
-**Option B: Brand URL CSV fallback**
+**Option B: Official brand URL CSV analysis**
 
-- Fill in `sample_brand_urls.csv` with `brand,url` rows.
+- Fill in `sample_brand_urls.csv` with `brand,url` rows using official product/spec pages.
 - Open the **Alternative: analyze official brand URLs from CSV** expander in the bottom brand section.
 - Upload the CSV and click **Analyze provided brand URLs**.
+- Use this option when you need source-grounded brand results instead of fallback-assisted results.
 
 ## Notes
 
 - Dashboard 3 follows the required 30% threshold by default. If no values meet the threshold, the app now shows a helpful message and the closest extracted values so it does not look broken.
 - The brand module now includes a **Brand Comparison Matrix** where each row is an attribute/value pair and each brand column shows whether that value was found.
+- If brand analysis previously showed `Brands analyzed: 48` but `Unique attributes: 0`, update to this version and keep **Auto-fill if AI returns empty** turned ON.
 - The target brand list is loaded directly into `app.py`.
 - The uploaded requirement calls this the Top 50 Brands list; the provided named list contains 48 entries. The app includes an input box where you can add extra brands without editing code.
 - AI output should still be reviewed by a domain expert before using it for compliance or purchasing decisions.
