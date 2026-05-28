@@ -810,7 +810,7 @@ def render_sidebar() -> Tuple[bool, bool, str]:
     return enable_ai, enable_validation, model.strip() or DEFAULT_MODEL
 
 
-def render_dashboard(records_df: pd.DataFrame, total_resources: int, title_prefix: str = "") -> None:
+def render_dashboard(records_df: pd.DataFrame, total_resources: int, title_prefix: str = "", key_prefix: str = "main") -> None:
     attr_counts, value_counts = build_dashboards(records_df, total_resources)
 
     c1, c2, c3 = st.columns(3)
@@ -837,26 +837,62 @@ def render_dashboard(records_df: pd.DataFrame, total_resources: int, title_prefi
             "Filter value breakdown by attribute",
             sorted(value_counts["Attribute"].unique()),
             default=sorted(value_counts["Attribute"].unique())[:5],
-            key=f"value_filter_{title_prefix}",
+            key=f"{key_prefix}_value_filter",
         )
         filtered = value_counts[value_counts["Attribute"].isin(selected_attrs)] if selected_attrs else value_counts
         st.dataframe(filtered, use_container_width=True, hide_index=True)
 
     st.subheader(f"{title_prefix}Dashboard 3: Advanced Attribute Search")
-    st.caption(f"Values are shown only when they appear in at least {int(SEARCH_THRESHOLD * 100)}% of analyzed resources.")
+    st.caption(
+        f"Default rule: values are shown only when they appear in at least "
+        f"{int(SEARCH_THRESHOLD * 100)}% of analyzed resources."
+    )
     if value_counts.empty:
         st.info("Search will appear after extraction.")
     else:
-        col_a, col_b = st.columns([1, 2])
+        col_a, col_b, col_c = st.columns([1.15, 1.35, 0.9])
         with col_a:
-            attribute_choice = st.selectbox("Attribute", sorted(value_counts["Attribute"].unique()), key=f"attr_search_{title_prefix}")
+            attribute_choice = st.selectbox(
+                "Choose attribute",
+                sorted(value_counts["Attribute"].unique()),
+                key=f"{key_prefix}_attr_search",
+            )
         with col_b:
-            text_filter = st.text_input("Optional value contains", key=f"text_filter_{title_prefix}")
-        search_df = value_counts[value_counts["Attribute"] == attribute_choice].copy()
-        search_df = search_df[search_df["Coverage %"] >= SEARCH_THRESHOLD * 100]
+            text_filter = st.text_input(
+                "Value contains",
+                key=f"{key_prefix}_text_filter",
+                placeholder="Example: PVC, 600 V, UL",
+            )
+        with col_c:
+            show_all = st.checkbox(
+                "Show all",
+                value=False,
+                key=f"{key_prefix}_show_all_values",
+                help="Default OFF keeps the required 30% threshold. Turn ON only to inspect lower-frequency extracted values.",
+            )
+
+        base_df = value_counts[value_counts["Attribute"] == attribute_choice].copy()
         if text_filter:
-            search_df = search_df[search_df["Value"].str.contains(text_filter, case=False, na=False)]
-        st.dataframe(search_df, use_container_width=True, hide_index=True)
+            base_df = base_df[base_df["Value"].str.contains(text_filter, case=False, na=False)]
+
+        threshold_percent = SEARCH_THRESHOLD * 100
+        passed_df = base_df[base_df["Coverage %"] >= threshold_percent].copy()
+        search_df = base_df if show_all else passed_df
+
+        if search_df.empty:
+            st.warning(
+                f"No values for '{attribute_choice}' match the current search and the "
+                f"{int(threshold_percent)}% threshold."
+            )
+            if not base_df.empty:
+                st.caption("Closest extracted values for this attribute are shown below so you can see why they were filtered out.")
+                st.dataframe(base_df.sort_values("Coverage %", ascending=False).head(20), use_container_width=True, hide_index=True)
+        else:
+            if show_all:
+                st.info("Showing all matching values, including values below the required 30% threshold.")
+            else:
+                st.success(f"Showing values that meet the required {int(threshold_percent)}% threshold.")
+            st.dataframe(search_df.sort_values("Coverage %", ascending=False), use_container_width=True, hide_index=True)
 
     st.subheader("Raw extracted records")
     st.dataframe(records_df, use_container_width=True, hide_index=True)
@@ -873,7 +909,7 @@ def render_dashboard(records_df: pd.DataFrame, total_resources: int, title_prefi
         data=export_bytes,
         file_name="technical_extraction_report.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key=f"download_{title_prefix}",
+        key=f"{key_prefix}_download_report",
     )
 
 
@@ -910,53 +946,90 @@ def render_main_analysis(enable_ai: bool, enable_validation: bool, model: str) -
         st.success("Analysis complete.")
 
     if "main_records" in st.session_state:
-        render_dashboard(st.session_state["main_records"], st.session_state.get("main_resource_count", 0))
+        render_dashboard(st.session_state["main_records"], st.session_state.get("main_resource_count", 0), key_prefix="main")
 
 
-def render_brand_analysis(enable_ai: bool, model: str) -> None:
-    st.header("Separate Module: Top Brand Analysis")
-    st.write("This module mirrors the main dashboards, but counts market presence across the target brand ecosystem instead of uploaded resources.")
+def build_brand_comparison_matrix(brand_records: pd.DataFrame) -> pd.DataFrame:
+    """Create a simple brand comparison matrix: each row is Attribute + Value, each brand column marks presence."""
+    if brand_records.empty:
+        return pd.DataFrame(columns=["Attribute", "Value"])
+    df = brand_records[["resource_name", "attribute", "value"]].drop_duplicates().copy()
+    df["Present"] = "Yes"
+    matrix = (
+        df.pivot_table(
+            index=["attribute", "value"],
+            columns="resource_name",
+            values="Present",
+            aggfunc="first",
+            fill_value="",
+        )
+        .reset_index()
+        .rename(columns={"attribute": "Attribute", "value": "Value"})
+    )
+    brand_cols = sorted([c for c in matrix.columns if c not in {"Attribute", "Value"}])
+    return matrix[["Attribute", "Value"] + brand_cols]
+
+
+def render_brand_analysis(enable_ai: bool, model: str, key_prefix: str = "brand") -> None:
+    st.header("Brand Comparison / Top Brand Attribute Extraction")
+    st.write(
+        "Use this bottom section to extract common attributes and values from the listed brands. "
+        "The dashboards mirror the document analysis, but counts are based on brand presence."
+    )
 
     extra_brands_text = st.text_area(
         "Optional: add extra brand names, one per line",
         height=80,
+        key=f"{key_prefix}_extra_brands",
         help="The requirement document labels this as Top 50 Brands. The provided list contains 48 named entries, so you can add two more here without editing code.",
     )
     extra_brands = [b.strip() for b in extra_brands_text.splitlines() if b.strip()]
     brands = TARGET_BRANDS + [b for b in extra_brands if b not in TARGET_BRANDS]
 
-    with st.expander("View target brand list"):
-        st.write(pd.DataFrame({"Brand": brands}))
+    with st.expander("View listed brands used for comparison", expanded=False):
+        st.dataframe(pd.DataFrame({"Brand": brands}), use_container_width=True, hide_index=True)
 
-    st.subheader("Option A: Automatic AI web brand analysis")
-    st.caption("Uses your OpenAI API key and web-search-capable model where available. This can use API credits.")
+    st.subheader("Extract attributes and values from listed brands")
+    st.caption("This uses your OpenAI API key. If your model/account supports web search, it will use web-assisted brand analysis; otherwise it falls back to model-only analysis.")
     col1, col2 = st.columns([1, 1])
     with col1:
-        batch_size = st.selectbox("AI batch size", [2, 4, 5, 8], index=1)
+        batch_size = st.selectbox("AI batch size", [2, 4, 5, 8], index=1, key=f"{key_prefix}_batch_size")
     with col2:
-        brand_limit = st.number_input("Brands to analyze", min_value=1, max_value=len(brands), value=len(brands), step=1)
+        brand_limit = st.number_input(
+            "Brands to analyze",
+            min_value=1,
+            max_value=len(brands),
+            value=len(brands),
+            step=1,
+            key=f"{key_prefix}_brand_limit",
+        )
 
-    if st.button("Get common attributes and values from target brands", type="primary", disabled=not enable_ai):
+    if st.button(
+        "Get common attributes and values from the Top 50 Brands",
+        type="primary",
+        disabled=not enable_ai,
+        key=f"{key_prefix}_run_ai_brands",
+    ):
         if not enable_ai:
             st.warning("Turn on AI extraction and add your API key in Streamlit secrets first.")
             return
         brand_records = run_top_brand_ai_analysis(brands[:brand_limit], model=model, batch_size=int(batch_size))
         st.session_state["brand_records"] = brand_records
         st.session_state["brand_count"] = brand_records["resource_id"].nunique() if not brand_records.empty else brand_limit
-        st.success("Brand analysis complete.")
+        st.success("Brand attribute extraction and comparison complete.")
 
-    st.subheader("Option B: Brand URL CSV fallback")
-    st.write("Upload a CSV with columns `brand,url` if you want the app to scrape specific official pages instead of AI web search.")
-    brand_csv = st.file_uploader("Upload brand_urls.csv", type=["csv"], key="brand_csv")
-    if st.button("Analyze provided brand URLs"):
-        brand_url_map = parse_brand_urls_csv(brand_csv)
-        if not brand_url_map:
-            st.warning("Please upload a CSV with columns brand,url.")
-        else:
-            brand_records = analyze_brand_urls(brand_url_map, enable_ai=enable_ai, model=model)
-            st.session_state["brand_records"] = brand_records
-            st.session_state["brand_count"] = len(brand_url_map)
-            st.success("Brand URL analysis complete.")
+    with st.expander("Alternative: analyze official brand URLs from CSV"):
+        st.write("Upload a CSV with columns `brand,url` if you want the app to scrape specific official pages instead of relying on AI web analysis.")
+        brand_csv = st.file_uploader("Upload brand_urls.csv", type=["csv"], key=f"{key_prefix}_brand_csv")
+        if st.button("Analyze provided brand URLs", key=f"{key_prefix}_analyze_brand_urls"):
+            brand_url_map = parse_brand_urls_csv(brand_csv)
+            if not brand_url_map:
+                st.warning("Please upload a CSV with columns brand,url.")
+            else:
+                brand_records = analyze_brand_urls(brand_url_map, enable_ai=enable_ai, model=model)
+                st.session_state["brand_records"] = brand_records
+                st.session_state["brand_count"] = len(brand_url_map)
+                st.success("Brand URL analysis complete.")
 
     if "brand_records" in st.session_state:
         brand_records = st.session_state["brand_records"]
@@ -969,21 +1042,53 @@ def render_brand_analysis(enable_ai: bool, model: str) -> None:
 
         st.subheader("Brand Dashboard 1: Most Common Attributes")
         st.dataframe(attr_counts, use_container_width=True, hide_index=True)
+
         st.subheader("Brand Dashboard 2: Attribute Value Breakdown")
         st.dataframe(value_counts, use_container_width=True, hide_index=True)
+
         st.subheader("Brand Dashboard 3: Advanced Attribute Search")
-        st.caption(f"Values shown only when present in at least {int(SEARCH_THRESHOLD * 100)}% of analyzed brands.")
-        if not value_counts.empty:
-            count_col = [c for c in value_counts.columns if "Count" in c][0]
-            attr_choice = st.selectbox("Brand attribute", sorted(value_counts["Attribute"].unique()), key="brand_attr")
-            search_df = value_counts[(value_counts["Attribute"] == attr_choice) & (value_counts["Coverage %"] >= SEARCH_THRESHOLD * 100)]
-            st.dataframe(search_df, use_container_width=True, hide_index=True)
+        st.caption(f"Default rule: values are shown only when present in at least {int(SEARCH_THRESHOLD * 100)}% of analyzed brands.")
+        if value_counts.empty:
+            st.info("Brand search will appear after brand extraction.")
+        else:
+            col_a, col_b, col_c = st.columns([1.15, 1.35, 0.9])
+            with col_a:
+                attr_choice = st.selectbox("Brand attribute", sorted(value_counts["Attribute"].unique()), key=f"{key_prefix}_brand_attr")
+            with col_b:
+                brand_value_filter = st.text_input("Value contains", placeholder="Example: PVC, 600 V, UL", key=f"{key_prefix}_brand_value_filter")
+            with col_c:
+                show_all_brand = st.checkbox(
+                    "Show all",
+                    value=False,
+                    key=f"{key_prefix}_brand_show_all",
+                    help="Default OFF keeps the required 30% threshold. Turn ON only to inspect lower-frequency values.",
+                )
+            base_df = value_counts[value_counts["Attribute"] == attr_choice].copy()
+            if brand_value_filter:
+                base_df = base_df[base_df["Value"].str.contains(brand_value_filter, case=False, na=False)]
+            threshold_percent = SEARCH_THRESHOLD * 100
+            passed_df = base_df[base_df["Coverage %"] >= threshold_percent].copy()
+            search_df = base_df if show_all_brand else passed_df
+            if search_df.empty:
+                st.warning(f"No brand values for '{attr_choice}' match the current search and the {int(threshold_percent)}% threshold.")
+                if not base_df.empty:
+                    st.caption("Closest extracted brand values are shown below so you can see why they were filtered out.")
+                    st.dataframe(base_df.sort_values("Coverage %", ascending=False).head(20), use_container_width=True, hide_index=True)
+            else:
+                st.dataframe(search_df.sort_values("Coverage %", ascending=False), use_container_width=True, hide_index=True)
+
+        st.subheader("Brand Comparison Matrix")
+        st.caption("Rows are attribute/value pairs. A 'Yes' means the value was found for that brand.")
+        matrix_df = build_brand_comparison_matrix(brand_records)
+        st.dataframe(matrix_df, use_container_width=True, hide_index=True)
+
         st.subheader("Raw brand records")
         st.dataframe(brand_records, use_container_width=True, hide_index=True)
         export_bytes = dataframe_to_excel_bytes(
             {
                 "Brand Attributes": attr_counts,
                 "Brand Values": value_counts,
+                "Brand Comparison Matrix": matrix_df,
                 "Raw Brand Records": brand_records,
             }
         )
@@ -992,6 +1097,7 @@ def render_brand_analysis(enable_ai: bool, model: str) -> None:
             data=export_bytes,
             file_name="top_brand_analysis_report.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"{key_prefix}_download_brand_report",
         )
 
 
@@ -1025,12 +1131,12 @@ streamlit run app.py
 def main() -> None:
     render_header()
     enable_ai, enable_validation, model = render_sidebar()
-    tab1, tab2, tab3 = st.tabs(["Documents & URLs", "Top Brands", "Deploy Help"])
+    tab1, tab2 = st.tabs(["Documents, URLs & Brand Comparison", "Deploy Help"])
     with tab1:
         render_main_analysis(enable_ai, enable_validation, model)
+        st.divider()
+        render_brand_analysis(enable_ai, model, key_prefix="bottom_brand")
     with tab2:
-        render_brand_analysis(enable_ai, model)
-    with tab3:
         render_deployment_help()
 
 

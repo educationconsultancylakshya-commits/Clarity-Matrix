@@ -11,8 +11,8 @@ A ready-to-use Streamlit web platform for extracting and comparing technical spe
 - Show dashboards for:
   - Most common attributes
   - Attribute value breakdown
-  - Advanced attribute search with a **30% minimum appearance threshold**
-- Run a separate target brand analysis module and export Excel reports.
+  - Advanced attribute search with a **30% minimum appearance threshold**, plus a troubleshooting **Show all** option
+- Run a bottom-page brand comparison module that extracts common attributes and values from the listed brands, then exports Excel reports.
 
 ## Files in this repository
 
@@ -92,7 +92,9 @@ Then open the local URL shown in the terminal.
 5. Review the dashboards.
 6. Download the Excel report.
 
-### Top Brand Analysis
+### Brand Comparison / Top Brand Attribute Extraction
+
+This section now appears **at the bottom of the main platform page**, underneath the document and URL analysis area.
 
 There are two options:
 
@@ -100,17 +102,19 @@ There are two options:
 
 - Turn on AI extraction in the sidebar.
 - Add your OpenAI API key in Streamlit Cloud secrets.
-- Open the **Top Brands** tab.
-- Click **Get common attributes and values from target brands**.
+- Scroll to the bottom section named **Brand Comparison / Top Brand Attribute Extraction**.
+- Click **Get common attributes and values from the Top 50 Brands**.
 
 **Option B: Brand URL CSV fallback**
 
 - Fill in `sample_brand_urls.csv` with `brand,url` rows.
-- Upload the CSV in the **Top Brands** tab.
-- Click **Analyze provided brand URLs**.
+- Open the **Alternative: analyze official brand URLs from CSV** expander in the bottom brand section.
+- Upload the CSV and click **Analyze provided brand URLs**.
 
 ## Notes
 
+- Dashboard 3 follows the required 30% threshold by default. If no values meet the threshold, the app now shows a helpful message and the closest extracted values so it does not look broken.
+- The brand module now includes a **Brand Comparison Matrix** where each row is an attribute/value pair and each brand column shows whether that value was found.
 - The target brand list is loaded directly into `app.py`.
 - The uploaded requirement calls this the Top 50 Brands list; the provided named list contains 48 entries. The app includes an input box where you can add extra brands without editing code.
 - AI output should still be reviewed by a domain expert before using it for compliance or purchasing decisions.
